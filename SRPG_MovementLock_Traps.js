@@ -1,3 +1,75 @@
+//=============================================================================
+// SRPG Trap & Movement Plugin
+// Author: NoobieMcNoobs
+// Version: 1.0
+//=============================================================================
+
+/*:
+ * @plugindesc v1.0 Extends SRPG Core 1.34+Q with trap events, floor damage, dynamic movement overrides, cancel logic & compatibility fixes.
+ * @author NoobieMcNoobs - (ChatGPT)
+ *
+ * @help
+ * ----------------------------------------------------------------------------
+ * DESCRIPTION
+ * ----------------------------------------------------------------------------
+ * This all‑in‑one plugin adds:
+ *   • **Trap Events**: Stepping on event triggers a skill via <TrapEvent:x> and  
+ *     uses class/level from <TrapStats:a,b>.
+ *   • **Floor Damage**: Region‑based effects via map notes  
+ *     `<FloorSkillX:x>` and `<FloorStatsX:a,b>`, optional `<FloorTriggerOnNoTriggerX>`.
+ *   • **NoTrigger State**: Use `<NoTrigger>` on states to skip traps/floor or  
+ *     require it via `<FloorTriggerOnNoTriggerX>`.
+ *   • **Team Restriction**: `<TriggerTeam:Actor>` or `<TriggerTeam:Enemy>` on  
+ *     trap/floor note to restrict to actors or enemies.
+ *   • **Movement Overrides**: Custom `srpgMove()` for actors & enemies reading  
+ *     meta tags (srpgMove, srpgMovePlus, tempMoveRange) and equipment.
+ *   • **Terrain Costs**: Calculates move distance with terrain tags 4 (cost 2)  
+ *     and 5 (cost 3).
+ *   • **Temporary Move Range**: Stores and restores remaining movement after  
+ *     cancel or trap stop, resets at turn end.
+ *   • **Cancel Handling**: Improved cancel in `actor_move`, `actor_target`, and  
+ *     `status_window` phases, with correct move/range table rebuild.
+ *   • **Compatibility Patches**: Defensive initialization of MoveTable/RangeTable,  
+ *     LoS support in `makeRangeTable`, pageup/pagedown actor cycling.
+ *
+ * ----------------------------------------------------------------------------
+ * INSTALLATION
+ * ----------------------------------------------------------------------------
+ * 1. Place below **SRPG Core 1.34+Q** in the Plugin Manager.
+ * 2. No parameters—configure entirely via note tags.
+ *
+ * ----------------------------------------------------------------------------
+ * NOTE TAGS
+ * ----------------------------------------------------------------------------
+ * Event Note Tags:
+ *   <TrapEvent:x>         # Skill ID to trigger
+ *   <TrapStats:a,b>       # Class ID, Level for simulated battler
+ *   <NoTrigger>           # State tag to prevent triggering
+ *   <TriggerTeam:Actor>   # Only actors trigger
+ *   <TriggerTeam:Enemy>   # Only enemies trigger
+ *
+ * Map Note Tags:
+ *   <FloorSkillX:x>             # Skill ID for region X
+ *   <FloorStatsX:a,b>           # Class ID, Level for region X
+ *   <FloorTriggerOnNoTriggerX>  # Only units with <NoTrigger> trigger
+ *
+ * ----------------------------------------------------------------------------
+ * USAGE EXAMPLES
+ * ----------------------------------------------------------------------------
+ * 1. **Trap**:  
+ *    Event note: `<TrapEvent:10><TrapStats:2,5><TriggerTeam:Enemy>`  
+ *    — Enemy stepping on it takes Skill #10 damage from a Level‑5 Class‑2 battler.
+ *
+ * 2. **Floor Damage** (region 3):  
+ *    Map note: `<FloorSkill3:5><FloorStats3:1,3><FloorTriggerOnNoTrigger3>`  
+ *    — Region 3 applies Skill #5 from a Level‑3 Class‑1 battler, only if unit has `<NoTrigger>`.
+ *
+ * ----------------------------------------------------------------------------
+ * TERMS OF USE
+ * ----------------------------------------------------------------------------
+ * Free for commercial or non‑commercial projects. Credit not required.
+ */
+
 (function() {
 
 //=============================================================================
@@ -9,6 +81,19 @@
     let lastTileKey = null; // Track the last tile the unit was on
     let startingPosition = null; // Track the starting position of the selected unit
     let alreadyCheckedTile = false; // Tracks whether the current tile has been processed
+
+
+
+    if (!Scene_Map.prototype._originalEnemyMove) {
+        Scene_Map.prototype._originalEnemyMove = Scene_Map.prototype.srpgInvokeEnemyMove;
+    }
+    if (!Scene_Map.prototype._originalAutoUnitAction) {
+        Scene_Map.prototype._originalAutoUnitAction = Scene_Map.prototype.srpgInvokeAutoUnitAction;
+    }
+    // (Optionally, if your SRPG Core has an actor movement function, save it too.)
+    if (Scene_Map.prototype.srpgInvokeActorMove && !Scene_Map.prototype._originalActorMove) {
+        Scene_Map.prototype._originalActorMove = Scene_Map.prototype.srpgInvokeActorMove;
+    }
 
 //=============================================================================
 //---Traps---
@@ -26,53 +111,6 @@
     
         const match = event.event().note.match(new RegExp(`<${tagName}:(.+?)>`));
         return match ? match[1] : null;
-    }
-
-    // This function is called to check if a trap should stop or be triggered based on the <StopOnTrigger> tag
-    function checkStopOnTrigger() {
-        // If no trap has been triggered, return null
-        if (!lastTriggeredTrap) {
-            return null;
-        }
-        
-        // Retrieve the event based on the last triggered trap ID
-        let trapEvent = $gameMap.event(lastTriggeredTrap);
-        
-        if (trapEvent && trapEvent.event().note.includes('<StopOnTrigger>')) {
-            // Trap has been triggered and has <StopOnTrigger> tag
-            console.log(`StopOnTrigger triggered for trap event ID: ${lastTriggeredTrap}`);
-
-            // Retrieve the trap's X and Y coordinates
-            var trapX = trapEvent.x;
-            var trapY = trapEvent.y;
-
-            // Retrieve additional trap details, if needed
-            var trapDetails = getTrapNoteValue(lastTriggeredTrap, "TrapStats");
-            console.log(`Trap Details: ${trapDetails}`);
-
-            // Handle the logic for stopping movement and setting remaining moves to 0
-            const activeUnitId = $gameTemp.activeEvent().eventId(); // Get active unit's event ID
-            const battlerArray = $gameSystem.EventToUnit(activeUnitId);
-
-            if (battlerArray && battlerArray[0] === 'actor') {
-                const activeActor = battlerArray[1];
-                if (typeof activeActor.setTemporaryMoveRange === "function") {
-                    activeActor.setTemporaryMoveRange(0); // Set temporary move range to 0
-                    console.log(`Temporary Move Range set to 0 for Actor ID: ${activeActor.actorId()}`);
-                } else {
-                    console.error("setTemporaryMoveRange function not available on activeActor.");
-                }
-            }
-
-            // Return trap event details and coordinates
-            return {
-                trapEventId: lastTriggeredTrap,
-                trapX: trapX,
-                trapY: trapY
-            };
-        }
-
-        return null; // No active trap or no active trap with <StopOnTrigger>
     }
     
     /**
@@ -147,77 +185,21 @@
         return false; // Doesn't match the specified team.
     }
 //======================================================================================
-//---ENEMY STOP ON TRAP LOGIC---
+//---Movement overRide---
 //======================================================================================
+    Game_Battler.prototype.srpgMove = function() {
+        // If movement is overridden (e.g., restricted state), return that value.
+        if (this._srpgMoveOverride !== undefined) return this._srpgMoveOverride;
 
-    Game_Event.prototype.resetActions = function() {
-        this.clearActions(); // Clear any previous actions
-        this.setupActions(); // Set up new actions
-        this.start(); // Restart the event's actions
-        $gameTemp.pushSrpgEventList(this); // Add to temporary event list
+        let n = this.traitObjects().reduce((r, trait) => 
+            r + (trait.meta.srpgMove ? Number(trait.meta.srpgMove) : 0), 0);
 
-        // Temporarily replace srpgInvokeEnemyMove with srpgInvokeEnemyBoundAction
-        Scene_Map.prototype.srpgInvokeEnemyMove = Scene_Map.prototype.srpgInvokeEnemyBoundAction;
-    };
-
-    Game_System.prototype.srpgRestartActiveEnemyTurn = function() {
-        // Get the currently active event
-        const activeEvent = $gameTemp.activeEvent();
-
-        // Check if the active event is an enemy
-        if (activeEvent && $gameSystem.EventToUnit(activeEvent.eventId())[0] === 'enemy') {
-            // Set the sub-phase to 'after_battle'
-            $gameSystem.setSubBattlePhase('after_battle');
-
-            const activeUnitId = activeEvent.eventId();
-
-            // Filter and process the relevant enemy event
-            const targetEvent = $gameMap.events().find(event =>
-                event.isType() === 'enemyTurn' && event.eventId() === activeUnitId
-            );
-
-            if (targetEvent && targetEvent.pageIndex() >= 0) {
-                targetEvent.resetActions(); // Use the new method for resetting actions
-            }
-
-            // Set the battle phase and sub-phase for the enemy's turn
-            this.setBattlePhase('enemy_phase');
-            setTimeout(() => {
-                this.setSubBattlePhase('enemy_command');
-            }, 250);
-        }
-    };    
-
-    Scene_Map.prototype.srpgInvokeEnemyBoundAction = function() {
-        var event = $gameTemp.activeEvent();
-        var type = $gameSystem.EventToUnit(event.eventId())[0];
-        var enemy = $gameSystem.EventToUnit(event.eventId())[1];
-        var targetType = this.makeTargetType(enemy, type);
-
-        // No need for srpgMakeMoveTable or movement logic here
-        this.srpgPriorityTarget(enemy); // Prioritize target setting
-
-        var canAttackTargets = this.srpgMakeCanAttackTargets(enemy, targetType); // Get possible attack targets
-        var targetEvent = this.srpgDecideTarget(canAttackTargets, event, targetType); // Choose the target event
-        $gameTemp.setTargetEvent(targetEvent);
-
-        if ($gameTemp.isSrpgBestSearchFlag() == true) {
-            $gameTemp.setSrpgBestSearchFlag(false);
+        // If unit has a state with <restrict:true>, movement is 0.
+        if (this.states().some(state => state.meta.restrict === "true")) {
+            return 0;
         }
 
-        // Decide action based on the enemy's current state and target (no movement)
-        var action = this.srpgDecideAction(enemy, targetEvent, type); // You can decide the action logic here
-
-        // Perform the decided action (attack, skill, etc.)
-        this.srpgPerformEnemyAction(enemy, action, targetEvent);
-
-        // Set battle phase for the enemy's action
-        $gameSystem.setSubBattlePhase('enemy_action');
-    };
-
-    Game_System.prototype.setEnemyRestart = function() {
-        $gameSystem.setSubBattlePhase('after_battle');
-        $gameSystem.srpgRestartActiveEnemyTurn();
+        return Math.max(n, 0); // Ensure movement is never negative.
     };
 
 //======================================================================================
@@ -296,26 +278,6 @@
             lastTriggeredTrap = trapEventId;
             return;
         }
-
-        // Handle <StopOnTrigger> note
-        if (trapNote.includes('<StopOnTrigger>')) {
-            console.log("Trap has <StopOnTrigger> comment. Stopping unit's movement.");
-
-            activeEvent.locate(trapEvent.x, trapEvent.y); // Relocate to trap position
-            $gameSystem.setSrpgWaitMoving(false);
-
-            if (battlerArray[0] === 'actor') {
-                console.log("Actor triggered the trap.");
-                $gameSystem.setSubBattlePhase('actor_command_window');
-                activeEvent._srpgForceRoute = [];
-            } else if (battlerArray[0] === 'enemy') {
-                console.log("Enemy triggered the trap.");
-                activeEvent.srpgMoveRouteForce([]);
-                $gameSystem.setEnemyRestart();
-            }
-        }
-
-        lastTriggeredTrap = trapEventId; // Mark trap as triggered
     }
               
 //======================================================================================
@@ -510,6 +472,10 @@
         }
     };
 
+    window.setEnemyStopFlag = function(flag) {
+        EnemyStop = flag;
+    };
+
 
 //=============================================================================
 
@@ -536,33 +502,49 @@
 //=============================================================================
 
     Game_Actor.prototype.srpgMove = function() {
-        // Get base movement from the actor's metadata or fallback to _defaultMove
+        // If the actor has a state with <restrict:true>, force movement to 0.
+        if (this.states().some(state => state.meta.restrict === "true")) {
+            return 0;
+        }
+
+        // Get base movement from the actor's metadata or use the default move.
         let n = this.actor().meta.srpgMove ? Number(this.actor().meta.srpgMove) : _defaultMove;
 
-        // Adjust move based on the current class's srpgMovePlus, if it exists
+        // Add the current class's srpgMovePlus, if it exists.
         if (this.currentClass().meta.srpgMovePlus) {
             n += Number(this.currentClass().meta.srpgMovePlus);
         }
 
-        // Adjust move based on states
+        // Process states for extra modifiers.
         this.states().forEach(state => {
             if (state.meta.srpgMovePlus) {
                 n += Number(state.meta.srpgMovePlus);
             }
+            if (state.meta.tempMoveRange) {
+                n += Number(state.meta.tempMoveRange);
+            }
+            if (state.meta.srpgMove) {
+                n += Number(state.meta.srpgMove);
+            }
         });
 
-        // Adjust move based on equipped items
+        // Process equipped items.
         this.equips().forEach(item => {
             if (item && item.meta.srpgMovePlus) {
                 n += Number(item.meta.srpgMovePlus);
             }
         });
 
-        // Ensure non-negative move value
+        // Prevent a negative move value.
         return Math.max(n, 0);
     };
 
     Game_Enemy.prototype.srpgMove = function() {
+        // If the actor has a state with <restrict:true>, force movement to 0.
+        if (this.states().some(state => state.meta.restrict === "true")) {
+            return 0;
+        }
+
         // Get base movement from the actor's metadata or fallback to _defaultMove
         let n = this.enemy().meta.srpgMove ? Number(this.actor().meta.srpgMove) : _defaultMove;
 
@@ -575,6 +557,9 @@
         this.states().forEach(state => {
             if (state.meta.srpgMovePlus) {
                 n += Number(state.meta.srpgMovePlus);
+            }
+            if (state.meta.srpgMove) {
+                n += Number(state.meta.srpgMove);
             }
         });
 
@@ -698,72 +683,55 @@
 
     Scene_Map.prototype.selectPreviousActorCommand = function() {
         var event = $gameTemp.activeEvent();
-        var storedPos = $gameTemp.getActorMovePosition();
+        
+        // Get the battler from the event
+        var battlerArray = $gameSystem.EventToUnit(event.eventId());
+        var actor = battlerArray[1];
+        
+        // If the actor was locked by a trap (<stopOnTrigger>),
+        // use the trap's current coordinates rather than the previously stored move position.
+        var storedPos;
+        if (actor._temporaryMovementLock) {
+            storedPos = { x: event.x, y: event.y };
+        } else {
+            storedPos = $gameTemp.getActorMovePosition();
+        }
+        
         var originalPos = $gameTemp.originalPos();
         
         // Retrieve pre-calculated remaining moves from $gameTemp
-        const preCalculatedMoves = $gameTemp._tempRemainingMoves || 0; // Default to 0 if not set
+        const preCalculatedMoves = $gameTemp._tempRemainingMoves || 0;
         console.log(`Pre-Calculated Remaining Moves: ${preCalculatedMoves}`);
         
-        var battlerArray = $gameSystem.EventToUnit(event.eventId());
-        var actor = battlerArray[1];  // Get the actor from the battler array
-        
-        // Dynamically update the actor's move range to the remaining moves
+        // Dynamically update the actor's temporary move range to the remaining moves
         actor.setTemporaryMoveRange(preCalculatedMoves);
         console.log(`Stored Position: ${storedPos.x}, ${storedPos.y}`);
         console.log(`Original Position: ${originalPos.x}, ${originalPos.y}`);
         
-        // **Check if a trap event with <StopOnTrigger> has been triggered**
-        let trapDetails = checkStopOnTrigger();  // This now returns trap details or null
-        if (trapDetails) {
-            let trapEvent = $gameMap.event(trapDetails.trapEventId);  // Get the trap event by its ID
-            if (trapEvent) {
-                // Retrieve the trap's X and Y coordinates
-                var trapX = trapEvent.x;
-                var trapY = trapEvent.y;
-        
-                // Update stored position to the trap's position
-                storedPos = { x: trapX, y: trapY };  // Set storedPos to trap's coordinates
-    
-                // Move the event to the trap's position
-                event.locate(trapX, trapY);  // Use locate to move the event
-        
-                console.log(`Trap triggered. Actor moving to: ${trapX}, ${trapY}`);
-        
-                // Clear previous movement or set new movement logic if needed
-                $gameTemp.clearMoveTable();
-                $gameTemp.clearRoute();
-                    
-                // Notify system that the actor has finished movement
-                $gameSystem.setSrpgWaitMoving(false);
-            }
-        } else {
-            console.log("No active trap or no trap with <StopOnTrigger> found.");
-        }
-        
-        // If storedPos was updated by the trap, use the new position
-        // Update the original position if different
+        // If storedPos differs from originalPos, update the original position to the new one.
         if (storedPos.x !== originalPos.x || storedPos.y !== originalPos.y) {
             $gameTemp.reserveOriginalPos(storedPos.x, storedPos.y);
-            //$gameTemp.setMoveTable(storedPos.x, storedPos.y, event.srpgMove(), event.srpgRoute());
             console.log(`Move Table Updated: ${storedPos.x}, ${storedPos.y}`);
         }
-    
-        // Move the event to the stored position (trap or original position)
+        
+        // Move the event to the stored position (i.e. the trap's position)
         event.locate(storedPos.x, storedPos.y);
         
-        // Clear movement tables and reset
+        // Clear movement tables and routes and the active event
         $gameTemp.clearMoveTable();
         $gameTemp.clearRoute();
         $gameTemp.clearActiveEvent();
         
-        // Update the SRPG phase
+        // Update the SRPG phase to 'normal'
         $gameSystem.clearSrpgActorCommandWindowNeedRefresh();
         $gameSystem.setSubBattlePhase('normal');
         
-        // Log the remaining moves using the pre-calculated value
         console.log(`Final Remaining Moves: ${preCalculatedMoves}`);
-    };                      
+        
+        // Optionally, remove the temporary movement lock so that on subsequent turns the actor moves normally:
+        actor._temporaryMovementLock = false;
+    };
+                          
        
 //=============================================================================
 
@@ -800,13 +768,13 @@
     
     // Function to calculate remaining moves after the move
     Game_Actor.prototype.calculateRemainingMoves = function() {
-        const maxMoves = this.srpgMove(); // Get the actor's SRPG move range
-        const distanceMoved = $gameTemp.getActorMoveDistance(); // Get the distance moved
-        const remainingMoves = Math.max(maxMoves - distanceMoved, 0); // Calculate remaining moves
-        // Log unit details for debugging and testing
+        const maxMoves = this.srpgMove(); // This will now be 0 if <blockFriends:true> is active.
+        const distanceMoved = $gameTemp.getActorMoveDistance();
+        const remainingMoves = Math.max(maxMoves - distanceMoved, 0);
         console.log(`Unit ID: ${this.actorId()} | Max Moves: ${maxMoves} | Distance Moved: ${distanceMoved} | Remaining Moves: ${remainingMoves}`);
-        return remainingMoves; // Return the remaining moves
+        return remainingMoves;
     };
+    
 
     Game_Actor.prototype.setTemporaryMoveRange = function(tempMoveRange) {
         if (!this._originalSrpgMove) {
@@ -915,7 +883,6 @@
 //=============================================================================
 //---Aoe---
 
-
 //=============================================================================
 //--srpg_Core1.34+Q---
 
@@ -1009,20 +976,26 @@
         }
     };
 
+    const _Game_Temp_initialize = Game_Temp.prototype.initialize;
+    Game_Temp.prototype.initialize = function() {
+        _Game_Temp_initialize.call(this);
+        this._MoveTable = []; // Initialize the move table here
+    };
+
     Game_Temp.prototype.setMoveTable = function(x, y, move, route) {
-        // Ensure the position [x] exists and is initialized
+        // Defensive check: initialize _MoveTable if it's not defined
+        if (!this._MoveTable) {
+            this._MoveTable = [];
+        }
         if (!this._MoveTable[x]) {
             this._MoveTable[x] = [];
         }
-        // Ensure the position [x][y] is valid
         if (!this._MoveTable[x][y]) {
-            this._MoveTable[x][y] = [null, null]; // Initialize if undefined
+            this._MoveTable[x][y] = [null, null];
         }
-        // Ensure move and route are valid
         if (move !== undefined && route !== undefined) {
-            this._MoveTable[x][y] = [move, route]; // Set move and route
+            this._MoveTable[x][y] = [move, route];
         } else {
-            // Optionally log an error if move or route is undefined
             console.error('Invalid move or route:', move, route);
         }
     };
