@@ -5,7 +5,7 @@
 //=============================================================================
 
 /*:
- * @plugindesc SRPG area-of-effect skills
+ * @plugindesc SRPG area-of-effect skills--<Line of Sight>--
  * @author Dr. Q + アンチョビ, Edited by Shoukang
  * 
  * @param AoE Color
